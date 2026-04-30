@@ -1,0 +1,52 @@
+[package]
+name = "whiplash"
+version = "0.1.0"
+description = "A Tauri App"
+authors = ["you"]
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+# The `_lib` suffix may seem redundant but it is necessary
+# to make the lib name unique and wouldn't conflict with the bin name.
+# This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
+name = "whiplash_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["protocol-asset", "devtools"] }
+tauri-plugin-opener = "2"
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Audio decoding and playback
+symphonia = { version = "0.5", features = ["mp3", "flac", "ogg", "wav", "isomp4", "aac"] }
+rodio = { version = "0.19", features = ["symphonia"] }
+rustfft = "6.2"
+
+# Metadata extraction
+audiotags = "0.5"
+lofty = "0.18"
+
+# Database
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+# File system
+walkdir = "2"
+dirs = "5"
+ignore = "0.4"
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# Time handling
+chrono = "0.4"
+
+# Ring buffer for audio samples
+ringbuf = "0.4"
+
