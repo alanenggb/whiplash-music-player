@@ -30,7 +30,7 @@
 	let showConfig = $state(false);
 
 	// Library filter state
-	let selectedFilter = $state<"all" | "most_played" | "recently_added" | "recently_modified" | "recently_played" | "never_played" | "top_rated" | "playlist" | "the_void" | "device">("all");
+	let selectedFilter = $state<"all" | "most_played" | "recently_added" | "recently_modified" | "recently_played" | "never_played" | "top_rated" | "playlist" | "the_void" | "device" | "spotify">("all");
 	let selectedPlaylistId = $state<number | null>(null);
 	let playlists = $state<Playlist[]>([]);
 	let libraryTracks = $state<Track[]>([]);
@@ -44,11 +44,24 @@
 	let devicesSectionCollapsed = $state(false);
 	let deviceCheckInterval: ReturnType<typeof setInterval> | null = null;
 
+	// Spotify playlists state
+	let spotifyPlaylists: any[] = $state([]);
+	let spotifyPlaylistTracks = $state<any[]>([]);
+	let selectedSpotifyPlaylistId = $state<string | null>(null);
+	let isLoadingSpotifyPlaylists = $state(false);
+	let isLoadingSpotifyTracks = $state(false);
+	let downloadingTracks = $state<Set<string>>(new Set());
+	let randomMode = $state(false);
+
 	// Context menu state
 	let contextMenuVisible = $state(false);
 	let contextMenuX = $state(0);
 	let contextMenuY = $state(0);
 	let contextMenuTrack = $state<Track | null>(null);
+	let spotifyContextMenuVisible = $state(false);
+	let spotifyContextMenuTrack = $state<any | null>(null);
+	let filterContextMenuVisible = $state(false);
+	let filterContextMenuFilter = $state<string | null>(null);
 	let playlistSubmenuVisible = $state(false);
 	let deviceSubmenuVisible = $state(false);
 	let newPlaylistName = $state("");
@@ -78,6 +91,7 @@
 	// Library left section collapse state
 	let filterSectionCollapsed = $state(false);
 	let playlistSectionCollapsed = $state(false);
+	let spotifySectionCollapsed = $state(false);
 
 	// Context menu positioning
 	let contextMenuPositionFromBottom = $state(false);
@@ -116,6 +130,9 @@
 		} else {
 			console.log("No saved database path found");
 		}
+		
+		// Load Spotify playlists
+		await loadSpotifyPlaylists();
 	}
 
 	// Save window position and size
@@ -253,6 +270,115 @@
 		}
 	}
 
+	async function loadSpotifyPlaylists() {
+		try {
+			isLoadingSpotifyPlaylists = true;
+			const playlists = await invoke<any[]>("get_spotify_playlists");
+			spotifyPlaylists = playlists;
+			console.log("Loaded Spotify playlists:", playlists.length);
+		} catch (error) {
+			console.log("No Spotify token or failed to load playlists:", error);
+			spotifyPlaylists = [];
+		} finally {
+			isLoadingSpotifyPlaylists = false;
+		}
+	}
+
+	async function loadSpotifySavedTracks() {
+		try {
+			isLoadingSpotifyTracks = true;
+			const tracks = await invoke<any[]>("get_spotify_saved_tracks");
+			spotifyPlaylistTracks = tracks;
+			console.log("Loaded Spotify saved tracks:", tracks.length);
+		} catch (error) {
+			console.error("Failed to load Spotify saved tracks:", error);
+			spotifyPlaylistTracks = [];
+			
+			// Check if it's a 403 error and differentiate between playlist restrictions vs access issues
+			const errorStr = String(error);
+			if (errorStr.includes("403") || errorStr.includes("Access denied")) {
+				// For saved tracks errors, treat as general access issues and force re-authentication
+				console.log(
+					"Spotify access denied. The token may have expired.\n\n" +
+					"Starting automatic re-authentication with Spotify...\n\n" +
+					"This will open a browser window for you to log in again."
+				);
+				
+				try {
+					console.log("Clearing Spotify token...");
+					const result = await invoke("force_spotify_reauth");
+					console.log(result);
+					console.log("Please go to Configuration > Spotify tab and click 'Login to Spotify' to re-authenticate.");
+					
+					// Clear playlists to show they need to re-auth
+					spotifyPlaylists = [];
+					spotifyPlaylistTracks = [];
+					selectedSpotifyPlaylistId = null;
+				} catch (reauthError) {
+					console.error("Failed to clear token:", reauthError);
+					console.log("Failed to clear token. Please try logging out and in again.");
+				}
+			} else {
+				console.log(`Failed to load saved tracks: ${error}`);
+			}
+		} finally {
+			isLoadingSpotifyTracks = false;
+		}
+	}
+
+	async function loadSpotifyPlaylistTracks(playlistId: string) {
+		try {
+			isLoadingSpotifyTracks = true;
+			const tracks = await invoke<any[]>("get_spotify_playlist_tracks", { playlistId });
+			spotifyPlaylistTracks = tracks;
+			console.log("Loaded Spotify playlist tracks:", tracks.length);
+		} catch (error) {
+			console.error("Failed to load Spotify playlist tracks:", error);
+			spotifyPlaylistTracks = [];
+			
+			// Check if it's a 403 error and differentiate between playlist restrictions vs access issues
+			const errorStr = String(error);
+			if (errorStr.includes("403") || errorStr.includes("Access denied")) {
+				// Check if this is a playlist-specific restriction (not a general access issue)
+				if (errorStr.includes("Cannot access playlist tracks") && errorStr.includes("appears to be public")) {
+					console.log(
+						"Playlist tracks access restricted. This is a playlist-specific restriction, not an authentication issue.\n\n" +
+						"The playlist is public but track access is restricted by the owner or due to licensing/regional restrictions.\n\n" +
+						"You remain logged in and can access other playlists."
+					);
+					// Don't force logout for playlist-specific restrictions
+					return;
+				}
+				
+				// For other 403 errors, treat as general access issues and force re-authentication
+				console.log(
+					"Spotify access denied. The token may have expired.\n\n" +
+					"Starting automatic re-authentication with Spotify...\n\n" +
+					"This will open a browser window for you to log in again."
+				);
+				
+				try {
+					console.log("Clearing Spotify token...");
+					const result = await invoke("force_spotify_reauth");
+					console.log(result);
+					console.log("Please go to Configuration > Spotify tab and click 'Login to Spotify' to re-authenticate.");
+					
+					// Clear the playlists to show they need to re-auth
+					spotifyPlaylists = [];
+					spotifyPlaylistTracks = [];
+					selectedSpotifyPlaylistId = null;
+				} catch (reauthError) {
+					console.error("Failed to clear token:", reauthError);
+					console.log("Failed to clear token. Please try logging out and in again.");
+				}
+			} else {
+				console.log(`Failed to load playlist tracks: ${error}`);
+			}
+		} finally {
+			isLoadingSpotifyTracks = false;
+		}
+	}
+
 	async function checkDeviceReachability() {
 		const reachable: Device[] = [];
 		for (const device of devices) {
@@ -272,6 +398,7 @@
 		selectedDeviceId = device.id;
 		selectedFilter = "device";
 		selectedPlaylistId = null;
+		selectedSpotifyPlaylistId = null;
 		try {
 			libraryTracks = await invoke<Track[]>("get_device_tracks", { devicePath: device.path });
 			tracks = libraryTracks;
@@ -336,6 +463,10 @@
 							filteredTracks = await invoke<Track[]>("get_device_tracks", { devicePath: device.path });
 						}
 					}
+					break;
+				case "spotify":
+					// Spotify playlists are handled separately, no tracks to load here
+					filteredTracks = [];
 					break;
 			}
 			libraryTracks = filteredTracks;
@@ -472,6 +603,34 @@
 		}
 	}
 
+	function showSpotifyTrackContextMenu(event: MouseEvent, spotifyTrack: any) {
+		closePlaylistContextMenu();
+		event.preventDefault();
+		
+		// Find the corresponding local track if available
+		const localTrack = findLocalTrackForSpotifyTrack(spotifyTrack);
+		
+		if (localTrack) {
+			// If track exists locally, use the regular context menu
+			showContextMenu(event, localTrack);
+		} else {
+			// Create a simplified context menu for Spotify tracks not available locally
+			spotifyContextMenuTrack = spotifyTrack;
+			contextMenuX = event.clientX;
+			contextMenuY = event.clientY;
+			spotifyContextMenuVisible = true;
+			contextMenuPositionFromBottom = false;
+			
+			// Calculate if menu should be positioned from bottom
+			const viewportHeight = window.innerHeight;
+			const estimatedMenuHeight = 100; // Simplified menu height
+			if (event.clientY + estimatedMenuHeight > viewportHeight) {
+				contextMenuPositionFromBottom = true;
+				contextMenuY = viewportHeight - event.clientY;
+			}
+		}
+	}
+
 	async function fetchPlaylistMembership(trackId: number) {
 		const membership: Record<number, boolean> = {};
 		for (const playlist of playlists) {
@@ -521,6 +680,35 @@
 		contextMenuPlaylist = null;
 	}
 
+	function closeSpotifyContextMenu() {
+		spotifyContextMenuVisible = false;
+		spotifyContextMenuTrack = null;
+	}
+
+	function showFilterContextMenu(event: MouseEvent, filterType: string) {
+		closePlaylistContextMenu();
+		event.preventDefault();
+		
+		filterContextMenuFilter = filterType;
+		contextMenuX = event.clientX;
+		contextMenuY = event.clientY;
+		filterContextMenuVisible = true;
+		contextMenuPositionFromBottom = false;
+		
+		// Calculate if menu should be positioned from bottom
+		const viewportHeight = window.innerHeight;
+		const estimatedMenuHeight = 80; // Simple menu height
+		if (event.clientY + estimatedMenuHeight > viewportHeight) {
+			contextMenuPositionFromBottom = true;
+			contextMenuY = viewportHeight - event.clientY;
+		}
+	}
+
+	function closeFilterContextMenu() {
+		filterContextMenuVisible = false;
+		filterContextMenuFilter = null;
+	}
+
 	async function confirmDeletePlaylist() {
 		if (!playlistToDelete) return;
 		try {
@@ -567,6 +755,12 @@
 
 			// Use Web Audio API for playback and FFT
 			await audioProcessor.loadAudioFromPath(track.file_path);
+			
+			// Set up ended event to play next track
+			audioProcessor.onEnded(() => {
+				playNext();
+			});
+			
 			audioProcessor.play();
 			analyserNode = audioProcessor.getAnalyser();
 
@@ -665,6 +859,12 @@
 
 	async function setVolume(value: number) {
 		volume = value;
+		
+		// Ensure audio processor is initialized
+		if (!audioProcessor) {
+			return;
+		}
+		
 		audioProcessor.setVolume(value);
 		localStorage.setItem("volume", value.toString());
 		// If user adjusts volume while muted, unmute
@@ -760,6 +960,80 @@
 		currentPlaylist = [...currentPlaylist, track];
 	}
 
+	async function addAllPlaylistTracksToQueue(playlist: Playlist) {
+		try {
+			const tracks = await invoke<Track[]>("get_playlist_tracks", { playlistId: playlist.id });
+			currentPlaylist = [...currentPlaylist, ...tracks];
+			console.log(`Added ${tracks.length} tracks from "${playlist.name}" to play queue`);
+		} catch (error) {
+			console.error("Failed to add playlist tracks to queue:", error);
+		}
+	}
+
+	async function addAllFilterTracksToQueue(filterType: string) {
+		try {
+			let tracks: Track[] = [];
+			
+			switch (filterType) {
+				case "all":
+					tracks = await invoke<Track[]>("get_all_tracks");
+					break;
+				case "most_played":
+					tracks = await invoke<Track[]>("get_most_played");
+					break;
+				case "recently_added":
+					tracks = await invoke<Track[]>("get_recently_added");
+					break;
+				case "recently_modified":
+					tracks = await invoke<Track[]>("get_recently_modified");
+					break;
+				case "recently_played":
+					tracks = await invoke<Track[]>("get_recently_played");
+					break;
+				case "the_void":
+					tracks = await invoke<Track[]>("get_tracks_not_in_playlist");
+					break;
+				case "never_played":
+					tracks = await invoke<Track[]>("get_never_played");
+					break;
+				case "top_rated":
+					tracks = await invoke<Track[]>("get_top_rated");
+					break;
+				case "spotify":
+					// For Spotify playlists, add the current Spotify playlist tracks
+					if (selectedSpotifyPlaylistId === "saved_tracks") {
+						// Convert Spotify tracks to local tracks if available
+						const spotifyTracks = spotifyPlaylistTracks;
+						for (const spotifyTrack of spotifyTracks) {
+							const localTrack = findLocalTrackForSpotifyTrack(spotifyTrack);
+							if (localTrack) {
+								tracks.push(localTrack);
+							}
+						}
+					} else {
+						// For regular Spotify playlists
+						const spotifyTracks = spotifyPlaylistTracks;
+						for (const spotifyTrack of spotifyTracks) {
+							const localTrack = findLocalTrackForSpotifyTrack(spotifyTrack);
+							if (localTrack) {
+								tracks.push(localTrack);
+							}
+						}
+					}
+					break;
+				default:
+					console.warn(`Unknown filter type: ${filterType}`);
+					return;
+			}
+			
+			currentPlaylist = [...currentPlaylist, ...tracks];
+			const filterName = filterType === "spotify" ? "Spotify" : filterType.charAt(0).toUpperCase() + filterType.slice(1).replace(/_/g, ' ');
+			console.log(`Added ${tracks.length} tracks from "${filterName}" to play queue`);
+		} catch (error) {
+			console.error("Failed to add filter tracks to queue:", error);
+		}
+	}
+
 	function removeFromPlaylist(index: number) {
 		currentPlaylist = currentPlaylist.filter((_, i) => i !== index);
 	}
@@ -774,11 +1048,29 @@
 			await playTrack(currentPlaylist[0]);
 			return;
 		}
-		const currentIndex = currentPlaylist.findIndex(
-			(t) => t.id === currentTrack!.id,
-		);
-		const nextIndex = (currentIndex + 1) % currentPlaylist.length;
-		await playTrack(currentPlaylist[nextIndex]);
+		
+		let nextTrack;
+		
+		if (randomMode) {
+			// Random mode: pick a random track different from current
+			const availableTracks = currentPlaylist.filter(t => t.id !== currentTrack!.id);
+			if (availableTracks.length === 0) {
+				// If only one track in playlist, play it again
+				nextTrack = currentTrack;
+			} else {
+				const randomIndex = Math.floor(Math.random() * availableTracks.length);
+				nextTrack = availableTracks[randomIndex];
+			}
+		} else {
+			// Normal mode: play next track sequentially
+			const currentIndex = currentPlaylist.findIndex(
+				(t) => t.id === currentTrack!.id,
+			);
+			const nextIndex = (currentIndex + 1) % currentPlaylist.length;
+			nextTrack = currentPlaylist[nextIndex];
+		}
+		
+		await playTrack(nextTrack);
 	}
 
 	async function playPrevious() {
@@ -879,19 +1171,201 @@
 		inlinePlaylistName = "";
 		inlinePlaylistCreationError = false;
 	}
-</script>
-<svelte:window oncontextmenu={(e) => e.preventDefault()} onclick={() => { closeContextMenu(); closePlaylistContextMenu(); playlistDropdownVisible = false; }} onkeydown={(e) => {
-	if (e.key === "Escape") {
-		closeContextMenu();
-		closePlaylistContextMenu();
-		playlistDropdownVisible = false;
-		showDeleteDialog = false;
-		playlistToDelete = null;
-		showConfig = false;
-	}
-}} />
 
-<div class="app">
+	// Spotify track functions
+	function isTrackAvailableOffline(spotifyTrack: any): boolean {
+		// Check if a track with the same name and artist exists in the library
+		const trackName = spotifyTrack.name.toLowerCase();
+		const artistName = spotifyTrack.artists[0]?.toLowerCase() || "";
+		
+		return libraryTracks.some(track => {
+			const libraryTrackName = (track.title || track.file_name).toLowerCase();
+			const libraryArtistName = (track.artist || "").toLowerCase();
+			
+			// More flexible matching - try multiple approaches
+			
+			// 1. Exact match (title + artist)
+			const exactMatch = libraryTrackName.includes(trackName) && libraryArtistName.includes(artistName);
+			
+			// 2. Handle "Artist - Title" format in filename/title
+			let filenameMatch = false;
+			if (libraryTrackName.includes(" - ")) {
+				const parts = libraryTrackName.split(" - ");
+				if (parts.length >= 2) {
+					const filenameArtist = parts[0].trim();
+					const filenameTitle = parts[1].replace(/\.(mp3|m4a|flac|wav)$/i, "").trim();
+					
+					// Check if Spotify artist matches filename artist OR if artist is Unknown
+					const artistMatches = libraryArtistName === "unknown" || 
+									 filenameArtist.toLowerCase().includes(artistName) || 
+									 artistName.includes(filenameArtist.toLowerCase());
+					
+					// Check if Spotify title matches filename title
+					const titleMatches = filenameTitle.toLowerCase().includes(trackName) || 
+									trackName.includes(filenameTitle.toLowerCase());
+					
+					filenameMatch = artistMatches && titleMatches;
+				}
+			}
+			
+			// 3. Partial match (main title + artist)
+			const mainTrackName = trackName.split(' - ')[0].split('(')[0].trim();
+			const mainLibraryName = libraryTrackName.split(' - ')[0].split('(')[0].trim();
+			const partialMatch = mainLibraryName.includes(mainTrackName) && libraryArtistName.includes(artistName);
+			
+			// 4. Artist + keyword match (for Unknown artists)
+			const artistMatch = (libraryArtistName.includes(artistName) || libraryArtistName === "unknown") && 
+							   (libraryTrackName.includes(trackName.split(' ')[0]) || 
+							    trackName.split(' ').some((word: string) => word.length > 3 && libraryTrackName.includes(word)));
+			
+			// 5. Reverse matching - check if library contains both artist and title words
+			const reverseMatch = libraryArtistName === "unknown" &&
+								libraryTrackName.includes(artistName) && 
+								libraryTrackName.includes(trackName.split(' ')[0]);
+			
+			return exactMatch || filenameMatch || partialMatch || artistMatch || reverseMatch;
+		});
+	}
+
+	function findLocalTrackForSpotifyTrack(spotifyTrack: any): Track | null {
+		// Find the corresponding local track for a Spotify track
+		const trackName = spotifyTrack.name.toLowerCase();
+		const artistName = spotifyTrack.artists[0]?.toLowerCase() || "";
+		
+		const foundTrack = libraryTracks.find(track => {
+			const libraryTrackName = (track.title || track.file_name).toLowerCase();
+			const libraryArtistName = (track.artist || "").toLowerCase();
+			
+			// More flexible matching - try multiple approaches
+			
+			// 1. Exact match (title + artist)
+			const exactMatch = libraryTrackName.includes(trackName) && libraryArtistName.includes(artistName);
+			
+			// 2. Handle "Artist - Title" format in filename/title
+			let filenameMatch = false;
+			if (libraryTrackName.includes(" - ")) {
+				const parts = libraryTrackName.split(" - ");
+				if (parts.length >= 2) {
+					const filenameArtist = parts[0].trim();
+					const filenameTitle = parts[1].replace(/\.(mp3|m4a|flac|wav)$/i, "").trim();
+					
+					// Check if Spotify artist matches filename artist OR if artist is Unknown
+					const artistMatches = libraryArtistName === "unknown" || 
+									 filenameArtist.toLowerCase().includes(artistName) || 
+									 artistName.includes(filenameArtist.toLowerCase());
+					
+					// Check if Spotify title matches filename title
+					const titleMatches = filenameTitle.toLowerCase().includes(trackName) || 
+									trackName.includes(filenameTitle.toLowerCase());
+					
+					filenameMatch = artistMatches && titleMatches;
+				}
+			}
+			
+			// 3. Partial match (main title + artist)
+			const mainTrackName = trackName.split(' - ')[0].split('(')[0].trim();
+			const mainLibraryName = libraryTrackName.split(' - ')[0].split('(')[0].trim();
+			const partialMatch = mainLibraryName.includes(mainTrackName) && libraryArtistName.includes(artistName);
+			
+			// 4. Artist + keyword match (for Unknown artists)
+			const artistMatch = (libraryArtistName.includes(artistName) || libraryArtistName === "unknown") && 
+							   (libraryTrackName.includes(trackName.split(' ')[0]) || 
+							    trackName.split(' ').some((word: string) => word.length > 3 && libraryTrackName.includes(word)));
+			
+			// 5. Reverse matching - check if library contains both artist and title words
+			const reverseMatch = libraryArtistName === "unknown" &&
+								libraryTrackName.includes(artistName) && 
+								libraryTrackName.includes(trackName.split(' ')[0]);
+			
+			const matches = exactMatch || filenameMatch || partialMatch || artistMatch || reverseMatch;
+			
+			return matches;
+		}) || null;
+		
+		return foundTrack;
+	}
+
+	async function downloadSpotifyTrack(spotifyTrack: any) {
+		const trackKey = `${spotifyTrack.name}-${spotifyTrack.artists[0]}`;
+		
+		try {
+			// Add to downloading set
+			downloadingTracks = new Set([...downloadingTracks, trackKey]);
+			
+			// Create search query from track name and artist
+			const searchQuery = `${spotifyTrack.name} ${spotifyTrack.artists[0]}`;
+			
+			// Search YouTube for video
+			const videoId = await invoke<string>("search_youtube_video", { query: searchQuery });
+			
+			if (!videoId) {
+				alert("Could not find a matching video on YouTube");
+				return;
+			}
+			
+			// Get watch folders and use the first one as download location
+			const watchFolders = await invoke<any[]>("get_watch_folders");
+			
+			if (watchFolders.length === 0) {
+				alert("No watch folders configured. Please add a watch folder in configuration.");
+				return;
+			}
+			
+			const downloadFolder = watchFolders[0]; // Use first watch folder
+			
+			// Create output filename
+			const sanitizedName = spotifyTrack.name.replace(/[<>:"/\\|?*]/g, "_");
+			const artistName = spotifyTrack.artists[0].replace(/[<>:"/\\|?*]/g, "_");
+			const filename = `${artistName} - ${sanitizedName}.m4a`;
+			const outputPath = `${downloadFolder.path}/${filename}`;
+			
+			// Download the audio
+			const result = await invoke<string>("download_audio_from_youtube", { 
+				videoId, 
+				outputPath 
+			});
+			
+			console.log(result);
+			console.log(`Downloaded: ${spotifyTrack.name}`);
+			
+			// Add the specific downloaded track to database (much faster than scanning entire folder)
+			const newTrack = await invoke<Track>("add_single_track_to_database", { filePath: outputPath });
+			
+			// Add the new track to the local library array (faster than full reload)
+			libraryTracks = [...libraryTracks, newTrack];
+			
+			// Refresh Spotify playlist tracks to update availability status
+			if (selectedSpotifyPlaylistId) {
+				if (selectedSpotifyPlaylistId === "saved_tracks") {
+					await loadSpotifySavedTracks();
+				} else {
+					await loadSpotifyPlaylistTracks(selectedSpotifyPlaylistId);
+				}
+			}
+			
+		} catch (error) {
+			console.error("Failed to download track:", error);
+			alert(`Failed to download track: ${error}`);
+		} finally {
+			// Remove from downloading set
+			downloadingTracks = new Set([...downloadingTracks].filter(id => id !== trackKey));
+		}
+	}
+</script>
+
+<div class="app" 
+		onclick={() => {
+			// Close all context menus when clicking outside
+			if (contextMenuVisible) closeContextMenu();
+			if (spotifyContextMenuVisible) closeSpotifyContextMenu();
+			if (playlistContextMenuVisible) closePlaylistContextMenu();
+			if (filterContextMenuVisible) closeFilterContextMenu();
+		}}
+		oncontextmenu={(e) => {
+			// Prevent default context menu everywhere
+			e.preventDefault();
+		}}
+	>
 
 	{#if dbInitialized}
 		<div class="main-content">
@@ -981,6 +1455,12 @@
 													).value,
 												),
 											)}
+										onwheel={async (e) => {
+											e.preventDefault();
+											const delta = e.deltaY > 0 ? -0.05 : 0.05;
+											const newVolume = Math.max(0, Math.min(1, volume + delta));
+											await setVolume(newVolume);
+										}}
 										class="volume-slider-compact"
 									/>
 								</div>
@@ -1020,7 +1500,30 @@
 							/>
 						</div>
 						<div class="player-buttons-section">
-							<!-- Buttons will be added here later -->
+							<button
+								class="btn btn-icon btn-random"
+								class:active={randomMode}
+								title="Random Mode"
+								onclick={() => randomMode = !randomMode}
+							>
+								<svg
+									xmlns="http://www.w3.org/2000/svg"
+									width="16"
+									height="16"
+									viewBox="0 0 24 24"
+									fill="none"
+									stroke="currentColor"
+									stroke-width="2"
+									stroke-linecap="round"
+									stroke-linejoin="round"
+								>
+									<polyline points="16 3 21 3 21 8"></polyline>
+									<line x1="4" y1="20" x2="21" y2="3"></line>
+									<polyline points="21 16 21 21 16 21"></polyline>
+									<line x1="15" y1="15" x2="10" y2="21"></line>
+									<line x1="4" y1="4" x2="9" y2="9"></line>
+								</svg>
+							</button>
 						</div>
 					</div>
 				</div>
@@ -1043,12 +1546,14 @@
 									onclick={() => {
 										selectedFilter = "all";
 										selectedPlaylistId = null;
+										selectedSpotifyPlaylistId = null;
 										if (searchQuery.trim()) {
 											searchTracks();
 										} else {
 											applyFilter();
 										}
 									}}
+									oncontextmenu={(e) => showFilterContextMenu(e, "all")}
 								>
 									All
 								</div>
@@ -1060,6 +1565,7 @@
 									onclick={() => {
 										selectedFilter = "most_played";
 										selectedPlaylistId = null;
+										selectedSpotifyPlaylistId = null;
 										if (searchQuery.trim()) {
 											searchTracks();
 										} else {
@@ -1077,6 +1583,7 @@
 									onclick={() => {
 										selectedFilter = "recently_added";
 										selectedPlaylistId = null;
+										selectedSpotifyPlaylistId = null;
 										if (searchQuery.trim()) {
 											searchTracks();
 										} else {
@@ -1094,6 +1601,7 @@
 									onclick={() => {
 										selectedFilter = "recently_modified";
 										selectedPlaylistId = null;
+										selectedSpotifyPlaylistId = null;
 										if (searchQuery.trim()) {
 											searchTracks();
 										} else {
@@ -1111,6 +1619,7 @@
 									onclick={() => {
 										selectedFilter = "recently_played";
 										selectedPlaylistId = null;
+										selectedSpotifyPlaylistId = null;
 										if (searchQuery.trim()) {
 											searchTracks();
 										} else {
@@ -1128,6 +1637,7 @@
 									onclick={() => {
 										selectedFilter = "the_void";
 										selectedPlaylistId = null;
+										selectedSpotifyPlaylistId = null;
 										if (searchQuery.trim()) {
 											searchTracks();
 										} else {
@@ -1145,6 +1655,7 @@
 									onclick={() => {
 										selectedFilter = "never_played";
 										selectedPlaylistId = null;
+										selectedSpotifyPlaylistId = null;
 										if (searchQuery.trim()) {
 											searchTracks();
 										} else {
@@ -1162,6 +1673,7 @@
 									onclick={() => {
 										selectedFilter = "top_rated";
 										selectedPlaylistId = null;
+										selectedSpotifyPlaylistId = null;
 										if (searchQuery.trim()) {
 											searchTracks();
 										} else {
@@ -1210,8 +1722,9 @@
 										class="filter-item"
 										class:selected={selectedFilter === "playlist" && selectedPlaylistId === playlist.id}
 										onclick={() => {
-											selectedFilter = "playlist";
-											selectedPlaylistId = playlist.id;
+										selectedFilter = "playlist";
+										selectedPlaylistId = playlist.id;
+										selectedSpotifyPlaylistId = null;
 											if (searchQuery.trim()) {
 												searchTracks();
 											} else {
@@ -1225,6 +1738,61 @@
 								{/each}
 								{#if playlists.length === 0}
 									<div class="empty-state">No playlists</div>
+								{/if}
+							</div>
+						</div>
+						<div class="spotify-section">
+							<!-- svelte-ignore a11y_click_events_have_key_events -->
+							<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+							<h4 class="section-header" onclick={() => spotifySectionCollapsed = !spotifySectionCollapsed}>
+								<span class="section-title">
+									<img src="/spotify_logo.svg" alt="Spotify" class="spotify-logo" />
+									Playlists
+								</span>
+								<span class="chevron" class:collapsed={spotifySectionCollapsed}>▼</span>
+							</h4>
+							<div class="filter-list" class:collapsed={spotifySectionCollapsed}>
+								{#if isLoadingSpotifyPlaylists}
+									<div class="loading-state">Loading Spotify playlists...</div>
+								{:else if spotifyPlaylists.length === 0}
+									<div class="empty-state">
+										<div>No Spotify playlists available</div>
+										<button class="btn btn-primary btn-small" onclick={() => showConfig = true}>
+											Login to Spotify
+										</button>
+									</div>
+								{:else}
+									<!-- Your Music - Saved Tracks -->
+									<div
+										class="filter-item"
+										class:selected={selectedSpotifyPlaylistId === "saved_tracks"}
+										onclick={() => {
+											selectedSpotifyPlaylistId = "saved_tracks";
+											selectedFilter = "spotify";
+											selectedPlaylistId = null;
+											loadSpotifySavedTracks();
+										}}
+									>
+										Your Music
+									</div>
+									{#each spotifyPlaylists as playlist}
+										<!-- svelte-ignore a11y_click_events_have_key_events -->
+										<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+										<div
+											class="filter-item"
+											class:selected={selectedSpotifyPlaylistId === playlist.id}
+											onclick={() => {
+												selectedSpotifyPlaylistId = playlist.id;
+												selectedFilter = "spotify"; // Set filter to spotify to show Spotify tracks
+												selectedPlaylistId = null;
+												// Load all library tracks to ensure availability check works correctly
+												loadTracks();
+												loadSpotifyPlaylistTracks(playlist.id);
+											}}
+										>
+											{playlist.name}
+										</div>
+									{/each}
 								{/if}
 							</div>
 						</div>
@@ -1377,32 +1945,96 @@
 									</tr>
 								</thead>
 								<tbody>
-									{#each libraryTracks as track}
-										<tr
-											class:active={currentTrack?.id === track.id}
-											onclick={() => playTrack(track)}
-											oncontextmenu={(e) => showContextMenu(e, track)}
-											onkeydown={(e) => {
-												if (e.key === "Enter" || e.key === " ")
-													playTrack(track);
-											}}
-											role="button"
-											tabindex="0"
-										>
-											<td class="track-title-cell" title={track.title || track.file_name}>{track.title || track.file_name}</td>
-											<td title={track.artist || "Unknown"}>{track.artist || "Unknown"}</td>
-											<td title={track.album || "Unknown"}>{track.album || "Unknown"}</td>
-											<td title={String(track.track_number || "-")}>{track.track_number || "-"}</td>
-											<td title={formatDuration(track.duration)}>{formatDuration(track.duration)}</td>
-											<td title={String(track.play_count)}>{track.play_count}</td>
-										</tr>
-									{/each}
-									{#if libraryTracks.length === 0}
-										<tr>
-											<td colspan="6" class="empty-state">
-												No tracks found. Scan a folder to add music.
-											</td>
-										</tr>
+									{#if selectedSpotifyPlaylistId}
+										<!-- Show Spotify playlist tracks -->
+										{#each spotifyPlaylistTracks as track}
+											<tr
+												class:disabled={!isTrackAvailableOffline(track)}
+												oncontextmenu={(e) => showSpotifyTrackContextMenu(e, track)}
+												onkeydown={(e) => {
+													if (e.key === "Enter" || e.key === " ") {
+														const localTrack = findLocalTrackForSpotifyTrack(track);
+														if (localTrack) {
+															playTrack(localTrack);
+														}
+													}
+												}}
+												role="button"
+												tabindex="0"
+											>
+												<td class="track-title-cell" title={track.name}>
+													<div class="track-title-wrapper" onclick={() => {
+														const localTrack = findLocalTrackForSpotifyTrack(track);
+														if (localTrack) {
+															playTrack(localTrack);
+														}
+													}}>
+														<span class="track-name">{track.name}</span>
+														{#if !isTrackAvailableOffline(track)}
+															<button
+																class="btn-download"
+																class:downloading={downloadingTracks.has(`${track.name}-${track.artists[0]}`)}
+																onclick={(e) => {
+																	e.stopPropagation();
+																	downloadSpotifyTrack(track);
+																}}
+																title="Download track"
+																disabled={downloadingTracks.has(`${track.name}-${track.artists[0]}`)}
+															>
+																{downloadingTracks.has(`${track.name}-${track.artists[0]}`) ? '⏳' : '⬇'}
+															</button>
+														{/if}
+													</div>
+												</td>
+												<td title={track.artists.join(", ")}>{track.artists.join(", ")}</td>
+												<td title={track.album}>{track.album}</td>
+												<td title="-">-</td>
+												<td title={formatDuration(track.duration_ms / 1000)}>{formatDuration(track.duration_ms / 1000)}</td>
+												<td title="-">-</td>
+											</tr>
+										{/each}
+										{#if isLoadingSpotifyTracks}
+											<tr>
+												<td colspan="6" class="loading-state">
+													Loading Spotify tracks...
+												</td>
+											</tr>
+										{:else if spotifyPlaylistTracks.length === 0}
+											<tr>
+												<td colspan="6" class="empty-state">
+													No tracks in this Spotify playlist.
+												</td>
+											</tr>
+										{/if}
+									{:else}
+										<!-- Show library tracks -->
+										{#each libraryTracks as track}
+											<tr
+												class:active={currentTrack?.id === track.id}
+												onclick={() => playTrack(track)}
+												oncontextmenu={(e) => showContextMenu(e, track)}
+												onkeydown={(e) => {
+													if (e.key === "Enter" || e.key === " ")
+														playTrack(track);
+												}}
+												role="button"
+												tabindex="0"
+											>
+												<td class="track-title-cell" title={track.title || track.file_name}>{track.title || track.file_name}</td>
+												<td title={track.artist || "Unknown"}>{track.artist || "Unknown"}</td>
+												<td title={track.album || "Unknown"}>{track.album || "Unknown"}</td>
+												<td title={String(track.track_number || "-")}>{track.track_number || "-"}</td>
+												<td title={formatDuration(track.duration)}>{formatDuration(track.duration)}</td>
+												<td title={String(track.play_count)}>{track.play_count}</td>
+											</tr>
+										{/each}
+										{#if libraryTracks.length === 0}
+											<tr>
+												<td colspan="6" class="empty-state">
+													No tracks found. Scan a folder to add music.
+												</td>
+											</tr>
+										{/if}
 									{/if}
 								</tbody>
 							</table>
@@ -1575,6 +2207,50 @@
 				</div>
 			{/if}
 
+			<!-- Spotify Context Menu -->
+			{#if spotifyContextMenuVisible && spotifyContextMenuTrack}
+				<!-- svelte-ignore a11y_click_events_have_key_events -->
+				<!-- svelte-ignore a11y_no_static_element_interactions -->
+				<div 
+					class="context-menu" 
+					style="left: {contextMenuX}px; top: {contextMenuPositionFromBottom ? 'auto' : contextMenuY + 'px'}; bottom: {contextMenuPositionFromBottom ? contextMenuY + 'px' : 'auto'};" 
+					onclick={(e) => e.stopPropagation()}
+					onmouseleave={() => {
+						setTimeout(() => {
+							closeSpotifyContextMenu();
+						}, 100);
+					}}
+					onmouseenter={() => {
+						// Keep menu open when mouse is over it
+					}}
+				>
+					<div
+						class="context-menu-item"
+						onclick={() => {
+							if (spotifyContextMenuTrack) {
+								downloadSpotifyTrack(spotifyContextMenuTrack);
+							}
+							closeSpotifyContextMenu();
+						}}
+					>
+						Download Track
+					</div>
+					<div
+						class="context-menu-item"
+						onclick={() => {
+							if (spotifyContextMenuTrack) {
+								// Open Spotify web player for this track
+								const spotifyUrl = spotifyContextMenuTrack.external_urls?.spotify || `https://open.spotify.com/track/${spotifyContextMenuTrack.id}`;
+								invoke("open", { path: spotifyUrl }).catch(console.error);
+							}
+							closeSpotifyContextMenu();
+						}}
+					>
+						Open in Spotify
+					</div>
+				</div>
+			{/if}
+
 			<!-- Playlist Context Menu -->
 			{#if playlistContextMenuVisible && contextMenuPlaylist}
 				<!-- svelte-ignore a11y_click_events_have_key_events -->
@@ -1584,11 +2260,53 @@
 						class="context-menu-item"
 						onclick={() => {
 							if (contextMenuPlaylist) {
+								addAllPlaylistTracksToQueue(contextMenuPlaylist);
+							}
+							closePlaylistContextMenu();
+						}}
+					>
+						Add All to Play Queue
+					</div>
+					<div
+						class="context-menu-item"
+						onclick={() => {
+							if (contextMenuPlaylist) {
 								initiateDeletePlaylist(contextMenuPlaylist);
 							}
 						}}
 					>
 						Delete Playlist
+					</div>
+				</div>
+			{/if}
+
+			<!-- Filter Context Menu -->
+			{#if filterContextMenuVisible && filterContextMenuFilter}
+				<!-- svelte-ignore a11y_click_events_have_key_events -->
+				<!-- svelte-ignore a11y_no_static_element_interactions -->
+				<div 
+					class="context-menu" 
+					style="left: {contextMenuX}px; top: {contextMenuPositionFromBottom ? 'auto' : contextMenuY + 'px'}; bottom: {contextMenuPositionFromBottom ? contextMenuY + 'px' : 'auto'};" 
+					onclick={(e) => e.stopPropagation()}
+					onmouseleave={() => {
+						setTimeout(() => {
+							closeFilterContextMenu();
+						}, 100);
+					}}
+					onmouseenter={() => {
+						// Keep menu open when mouse is over it
+					}}
+				>
+					<div
+						class="context-menu-item"
+						onclick={() => {
+							if (filterContextMenuFilter) {
+								addAllFilterTracksToQueue(filterContextMenuFilter);
+							}
+							closeFilterContextMenu();
+						}}
+					>
+						Add All to Play Queue
 					</div>
 				</div>
 			{/if}
@@ -1640,8 +2358,8 @@
 							>
 								<svg
 									xmlns="http://www.w3.org/2000/svg"
-									width="20"
-									height="20"
+									width="16"
+									height="16"
 									viewBox="0 0 24 24"
 									fill="none"
 									stroke="currentColor"
@@ -1665,8 +2383,8 @@
 								<svg
 									class="cog-icon"
 									xmlns="http://www.w3.org/2000/svg"
-									width="20"
-									height="20"
+									width="16"
+									height="16"
 									viewBox="0 0 24 24"
 									fill="none"
 									stroke="currentColor"
@@ -1680,6 +2398,7 @@
 									></path>
 								</svg>
 							</button>
+							
 							<button
 								onclick={() => invoke("open_devtools")}
 								class="btn btn-icon btn-config"
@@ -1688,8 +2407,8 @@
 								<svg
 									class="dev-icon"
 									xmlns="http://www.w3.org/2000/svg"
-									width="20"
-									height="20"
+									width="16"
+									height="16"
 									viewBox="0 0 24 24"
 									fill="none"
 									stroke="currentColor"
@@ -1726,16 +2445,19 @@
 							<div
 								class="track-item"
 								class:active={currentTrack?.id === track.id}
-								ondblclick={() => {
+								ondblclick={(e) => {
 									console.log(
 										"Double-clicked track:",
 										track.title || track.file_name,
 									);
+									// In playlist queue, tracks are already local tracks
 									playTrack(track);
 								}}
 								onkeydown={(e) => {
-									if (e.key === "Enter" || e.key === " ")
+									if (e.key === "Enter" || e.key === " ") {
+										// In playlist queue, tracks are already local tracks
 										playTrack(track);
+									}
 								}}
 								role="button"
 								tabindex="0"
@@ -1786,7 +2508,14 @@
 	{/if}
 </div>
 
-<ConfigDialog bind:show={showConfig} onFoldersChanged={loadTracks} />
+<ConfigDialog 
+	bind:show={showConfig} 
+	onFoldersChanged={loadTracks}
+	on:spotify-login-success={async () => {
+		console.log("Spotify login detected, refreshing playlists...");
+		await loadSpotifyPlaylists();
+	}}
+/>
 
 <style>
 	:global(body) {
@@ -1859,7 +2588,7 @@
 	.btn-config {
 		background: transparent;
 		color: #a0a0a0;
-		padding: 8px;
+		padding: 6px;
 		border-radius: 50%;
 		display: flex;
 		align-items: center;
@@ -2049,6 +2778,11 @@
 		color: #ffffff;
 	}
 
+	.btn-icon.active {
+		background: #4a4a4a;
+		color: #ffffff;
+	}
+
 	.library-section {
 		flex: 1;
 		display: flex;
@@ -2073,7 +2807,8 @@
 
 	.filter-section,
 	.playlist-section,
-	.devices-section {
+	.devices-section,
+	.spotify-section {
 		padding: 6px;
 		border-bottom: 1px solid #2d2d2d;
 	}
@@ -2676,6 +3411,61 @@
 		padding: 32px;
 		text-align: center;
 		color: #a0a0a0;
+	}
+
+	.spotify-logo {
+		width: 16px;
+		height: 16px;
+		margin-right: 2px;
+		margin-left: 2px;
+		vertical-align: middle;
+	}
+
+	.loading-state {
+		padding: 16px;
+		text-align: center;
+		color: #a0a0a0;
+		font-style: italic;
+	}
+
+	.track-title-wrapper {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		width: 100%;
+	}
+
+	.track-name {
+		flex: 1;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+
+	.btn-download {
+		background: #1ed760;
+		color: white;
+		border: none;
+		border-radius: 4px;
+		padding: 4px 8px;
+		cursor: pointer;
+		font-size: 12px;
+		margin-left: 8px;
+		transition: all 0.2s;
+	}
+
+	.btn-download:hover {
+		background: #1db954;
+		transform: scale(1.05);
+	}
+
+	.track-table tr.disabled {
+		opacity: 0.6;
+		cursor: not-allowed;
+	}
+
+	.track-table tr.disabled:hover {
+		background: transparent !important;
 	}
 
 	.btn {

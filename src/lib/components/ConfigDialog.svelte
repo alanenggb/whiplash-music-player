@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { invoke } from "@tauri-apps/api/core";
 	import { open } from "@tauri-apps/plugin-dialog";
+	import { createEventDispatcher } from "svelte";
 	import type { WatchFolder, Device, Drive, Folder } from "$lib/types";
 
 	let { show = $bindable(false), onFoldersChanged } = $props<{
@@ -20,11 +21,30 @@
 	let loadingDrives = $state(false);
 	let loadingFolders = $state(false);
 
+	// Spotify state
+	let isLoggedIn = $state(false);
+	let isLoadingAuth = $state(false);
+	let ytdlpAvailable = $state(false);
+	let isLoadingYtdlp = $state(false);
+	let selectedWatchFolder = $state<number | null>(null);
+
+	// Event dispatcher
+	const dispatch = createEventDispatcher();
+
 	// Load watch folders from database when dialog opens
 	$effect(() => {
 		if (show) {
 			loadWatchFolders();
 			loadDevices();
+			checkSpotifyAuth();
+			checkYtdlpAvailability();
+		}
+	});
+
+	// Set default selected watch folder when watchFolders change
+	$effect(() => {
+		if (watchFolders.length > 0 && selectedWatchFolder === null) {
+			selectedWatchFolder = watchFolders[0].id;
 		}
 	});
 
@@ -163,6 +183,61 @@
 	function closeDialog() {
 		show = false;
 	}
+
+	// Spotify functions
+	async function checkSpotifyAuth() {
+		try {
+			await invoke<string>("get_spotify_token");
+			isLoggedIn = true;
+		} catch (error) {
+			isLoggedIn = false;
+		}
+	}
+
+	async function loginSpotify() {
+		try {
+			isLoadingAuth = true;
+			await invoke("authenticate_spotify");
+			isLoggedIn = true;
+			// Emit event to notify main page to refresh Spotify playlists
+			dispatch("spotify-login-success");
+		} catch (error) {
+			console.error("Failed to authenticate with Spotify:", error);
+		} finally {
+			isLoadingAuth = false;
+		}
+	}
+
+	async function logoutSpotify() {
+		try {
+			await invoke("logout_spotify");
+			isLoggedIn = false;
+		} catch (error) {
+			console.error("Failed to logout from Spotify:", error);
+		}
+	}
+
+	async function checkYtdlpAvailability() {
+		try {
+			ytdlpAvailable = await invoke<boolean>("check_ytdlp_available");
+		} catch (error) {
+			console.error("Failed to check yt-dlp availability:", error);
+			ytdlpAvailable = false;
+		}
+	}
+
+	async function installYtdlp() {
+		try {
+			isLoadingYtdlp = true;
+			const result = await invoke<string>("install_ytdlp");
+			console.log(result);
+			await checkYtdlpAvailability();
+		} catch (error) {
+			console.error("Failed to install yt-dlp:", error);
+		} finally {
+			isLoadingYtdlp = false;
+		}
+	}
 </script>
 
 {#if show}
@@ -194,6 +269,16 @@
 					>
 						Devices
 					</li>
+					<!-- svelte-ignore a11y_click_events_have_key_events -->
+					<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+					<li
+						class:active={activeCategory === "spotify"}
+						onclick={() => {
+							activeCategory = "spotify";
+						}}
+					>
+						Spotify
+					</li>
 				</ul>
 			</div>
 
@@ -204,6 +289,8 @@
 							Watch Folders
 						{:else if activeCategory === "devices"}
 							Devices
+						{:else if activeCategory === "spotify"}
+							Spotify
 						{/if}
 					</h2>
 					<button class="btn-close" onclick={closeDialog}>✕</button>
@@ -413,6 +500,73 @@
 										</div>
 									{/if}
 								</div>
+							</div>
+						</div>
+					{:else if activeCategory === "spotify"}
+						<div class="spotify-panel">
+							<div class="spotify-section">
+								<h3>Authentication</h3>
+								{#if isLoadingAuth}
+									<p class="loading">Checking authentication...</p>
+								{:else if isLoggedIn}
+									<div class="auth-status logged-in">
+										<span class="status-icon">✓</span>
+										<span class="status-text">Logged in to Spotify</span>
+										<button class="btn btn-danger" onclick={logoutSpotify}>Logout</button>
+									</div>
+								{:else}
+									<div class="auth-status logged-out">
+										<span class="status-icon">⚠</span>
+										<span class="status-text">Not logged in to Spotify</span>
+										<button class="btn btn-primary" onclick={loginSpotify}>Login</button>
+									</div>
+								{/if}
+							</div>
+
+							<div class="spotify-section">
+								<h3>yt-dlp Setup</h3>
+								{#if isLoadingYtdlp}
+									<p class="loading">Installing yt-dlp...</p>
+								{:else if ytdlpAvailable}
+									<div class="ytdlp-status available">
+										<span class="status-icon">✓</span>
+										<span class="status-text">yt-dlp is available</span>
+									</div>
+								{:else}
+									<div class="ytdlp-status unavailable">
+										<span class="status-icon">⚠</span>
+										<span class="status-text">yt-dlp is not available</span>
+										<button class="btn btn-primary" onclick={installYtdlp}>Setup yt-dlp</button>
+									</div>
+								{/if}
+								{#if !ytdlpAvailable}
+									<p class="ytdlp-error">
+										If automatic setup fails, please install yt-dlp manually from 
+										<a href="https://github.com/yt-dlp/yt-dlp" target="_blank">https://github.com/yt-dlp/yt-dlp</a>
+										to enable music downloading.
+									</p>
+								{/if}
+							</div>
+
+							<div class="spotify-section">
+								<h3>Download Destination</h3>
+								{#if watchFolders.length === 0}
+									<p class="empty">No watch folders configured. Please add a watch folder first.</p>
+								{:else}
+									<div class="watch-folders-selection">
+										{#each watchFolders as folder}
+											<label class="folder-radio-label">
+												<input
+													type="radio"
+													name="download-folder"
+													bind:group={selectedWatchFolder}
+													value={folder.id}
+												/>
+												<span class="folder-path">{folder.path}</span>
+											</label>
+										{/each}
+									</div>
+								{/if}
 							</div>
 						</div>
 					{/if}
@@ -643,12 +797,6 @@
 		}
 	}
 
-	.folder-actions {
-		display: flex;
-		align-items: center;
-		gap: 16px;
-	}
-
 	.toggle-label {
 		display: flex;
 		align-items: center;
@@ -876,5 +1024,119 @@
 		font-size: 14px;
 		padding: 20px;
 		text-align: center;
+	}
+
+	/* Spotify Tab Styles */
+	.spotify-panel {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+		gap: 32px;
+		min-height: 0;
+	}
+
+	.spotify-section {
+		display: flex;
+		flex-direction: column;
+		gap: 16px;
+	}
+
+	.spotify-section h3 {
+		color: #e0e0e0;
+		font-size: 16px;
+		margin: 0;
+	}
+
+	.auth-status,
+	.ytdlp-status {
+		display: flex;
+		align-items: center;
+		gap: 12px;
+		padding: 16px;
+		background: #121212;
+		border-radius: 8px;
+		border: 1px solid #2d2d2d;
+	}
+
+	.auth-status.logged-in {
+		border-color: #4ade80;
+	}
+
+	.auth-status.logged-out {
+		border-color: #f87171;
+	}
+
+	.ytdlp-status.available {
+		border-color: #4ade80;
+	}
+
+	.ytdlp-status.unavailable {
+		border-color: #f87171;
+	}
+
+	.status-icon {
+		font-size: 18px;
+	}
+
+	.status-text {
+		flex: 1;
+		color: #e0e0e0;
+		font-size: 14px;
+	}
+
+	.ytdlp-error {
+		color: #a0a0a0;
+		font-size: 13px;
+		line-height: 1.4;
+		margin-top: 8px;
+	}
+
+	.ytdlp-error a {
+		color: #60a5fa;
+		text-decoration: none;
+	}
+
+	.ytdlp-error a:hover {
+		text-decoration: underline;
+	}
+
+	.watch-folders-selection {
+		display: flex;
+		flex-direction: column;
+		gap: 12px;
+		max-height: 300px;
+		overflow-y: auto;
+		padding-right: 8px;
+	}
+
+	.folder-radio-label {
+		display: flex;
+		align-items: center;
+		gap: 12px;
+		padding: 12px 16px;
+		background: #121212;
+		border-radius: 8px;
+		border: 1px solid #2d2d2d;
+		cursor: pointer;
+		transition: all 0.2s;
+	}
+
+	.folder-radio-label:hover {
+		background: #1e1e1e;
+		border-color: #3d3d3d;
+	}
+
+	.folder-radio-label input[type="radio"] {
+		accent-color: #ffffff;
+		width: 16px;
+		height: 16px;
+		cursor: pointer;
+	}
+
+	.folder-radio-label .folder-path {
+		flex: 1;
+		color: #e0e0e0;
+		font-size: 14px;
+		word-break: break-all;
 	}
 </style>

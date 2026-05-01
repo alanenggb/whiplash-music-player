@@ -50,3 +50,12 @@ chrono = "0.4"
 # Ring buffer for audio samples
 ringbuf = "0.4"
 
+# Spotify authentication
+rspotify = { version = "0.13", features = ["cli", "client-reqwest", "reqwest-default-tls"] }
+sha2 = "0.10"
+base64 = "0.22"
+rand = "0.8"
+reqwest = { version = "0.12", features = ["json"] }
+
+# Regular expressions
+regex = "1.10"

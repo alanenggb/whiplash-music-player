@@ -75,6 +75,41 @@ pub fn scan_directory(path: &Path) -> Vec<ScannedTrack> {
     tracks
 }
 
+pub fn scan_single_file(file_path: &Path) -> Option<ScannedTrack> {
+    if !file_path.is_file() || !is_audio_file(file_path) {
+        return None;
+    }
+    
+    if let Ok(metadata) = extract_metadata(file_path) {
+        let duration = AudioPlayer::get_duration(file_path).ok();
+        
+        let folder_path = file_path
+            .parent()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_default();
+        
+        let file_name = file_path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+
+        Some(ScannedTrack {
+            file_path: file_path.to_string_lossy().to_string(),
+            folder_path,
+            file_name,
+            title: metadata.title,
+            artist: metadata.artist,
+            album: metadata.album,
+            genre: metadata.genre,
+            year: metadata.year,
+            track_number: metadata.track_number,
+            duration,
+        })
+    } else {
+        None
+    }
+}
+
 #[allow(dead_code)]
 pub fn scan_with_ignore(path: &Path, ignore_file: Option<&Path>) -> Vec<ScannedTrack> {
     let mut tracks = Vec::new();

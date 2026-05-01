@@ -73,6 +73,19 @@ pub fn run() {
             commands::check_device_reachable,
             commands::get_device_tracks,
             commands::copy_file_to_device,
+            commands::authenticate_spotify,
+            commands::get_spotify_token,
+            commands::get_spotify_playlists,
+            commands::get_spotify_playlist_tracks,
+            commands::get_spotify_saved_tracks,
+            commands::search_youtube_video,
+            commands::download_audio_from_youtube,
+            commands::check_ytdlp_available,
+            commands::install_ytdlp,
+            commands::logout_spotify,
+            commands::force_spotify_reauth,
+            commands::get_selected_watch_folder,
+            commands::add_single_track_to_database,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

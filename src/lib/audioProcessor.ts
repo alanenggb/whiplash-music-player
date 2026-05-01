@@ -15,6 +15,12 @@ export class AudioProcessor {
 
 	constructor() {
 		this.initializeAudioContext();
+		// Initialize gainNode immediately so volume control works even before audio is loaded
+		if (this.audioContext) {
+			this.gainNode = this.audioContext.createGain();
+			// Connect gainNode to destination so volume changes work immediately
+			this.gainNode.connect(this.audioContext.destination);
+		}
 	}
 
 	private initializeAudioContext() {
@@ -41,7 +47,7 @@ export class AudioProcessor {
 		this.compressorNode.attack.value = 0.005;  // React quickly to peaks
 		this.compressorNode.release.value = 0.1;   // Release fairly quickly
 
-		this.gainNode = this.audioContext.createGain();
+		// gainNode is now created in constructor
 
 		// Create 10-band equalizer
 		this.equalizerBands = this.frequencies.map((freq) => {
@@ -90,6 +96,15 @@ export class AudioProcessor {
 		}
 
 		this.sourceNode = this.audioContext!.createMediaElementSource(this.audioElement);
+
+		// Disconnect gainNode from direct connection if it exists
+		if (this.gainNode) {
+			try {
+				this.gainNode.disconnect();
+			} catch (e) {
+				// Ignore if already disconnected
+			}
+		}
 
 		// Connect the audio graph: source -> EQ bands -> preGain -> analyser -> compressor -> gain -> destination
 		let currentNode: AudioNode = this.sourceNode;

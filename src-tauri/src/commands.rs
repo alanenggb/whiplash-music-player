@@ -1,13 +1,109 @@
 use crate::audio::AudioPlayer;
 use crate::database::Database;
 use crate::metadata::{write_metadata, TrackMetadata};
-use crate::scanner::scan_directory;
+use crate::scanner::{scan_directory, scan_single_file};
 use chrono::Utc;
+use dirs;
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use tauri::State;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+struct SpotifyToken {
+    access_token: String,
+    refresh_token: String,
+    expires_in: i64,
+    expires_at: i64, // Unix timestamp
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct SpotifyPlaylist {
+    pub id: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub external_urls: serde_json::Value,
+}
+
+fn get_cache_path() -> Result<std::path::PathBuf, String> {
+    let data_dir = dirs::data_dir().ok_or("Failed to get data directory")?;
+    let cache_path = data_dir.join("whiplash").join("spotify_token.json");
+    Ok(cache_path)
+}
+
+fn load_token() -> Option<SpotifyToken> {
+    let cache_path = get_cache_path().ok()?;
+    let content = std::fs::read_to_string(&cache_path).ok()?;
+    serde_json::from_str(&content).ok()
+}
+
+fn save_token(token: &SpotifyToken) -> Result<(), String> {
+    let cache_path = get_cache_path()?;
+    std::fs::create_dir_all(cache_path.parent().unwrap())
+        .map_err(|e| format!("Failed to create cache directory: {}", e))?;
+    std::fs::write(&cache_path, serde_json::to_string_pretty(token).unwrap())
+        .map_err(|e| format!("Failed to save token: {}", e))?;
+    Ok(())
+}
+
+fn is_token_valid(token: &SpotifyToken) -> bool {
+    let now = Utc::now().timestamp();
+    // Consider token valid if it has more than 60 seconds remaining
+    now < token.expires_at - 60
+}
+
+async fn refresh_token(refresh_token: &str) -> Result<SpotifyToken, String> {
+    let client_id = "a42d7e4861544e72b357a5350aebfe8d";
+    let client = reqwest::Client::new();
+    
+    let params = [
+        ("grant_type", "refresh_token"),
+        ("refresh_token", refresh_token),
+        ("client_id", client_id),
+    ];
+    
+    let response: reqwest::Response = client
+        .post("https://accounts.spotify.com/api/token")
+        .form(&params)
+        .send()
+        .await
+        .map_err(|e| format!("Failed to refresh token: {}", e))?;
+    
+    if response.status().is_success() {
+        let token_response: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|e| format!("Failed to parse token response: {}", e))?;
+        
+        let access_token = token_response["access_token"]
+            .as_str()
+            .ok_or("Missing access_token")?
+            .to_string();
+        
+        let refresh_token = token_response["refresh_token"]
+            .as_str()
+            .ok_or("Missing refresh_token")?
+            .to_string();
+        
+        let expires_in = token_response["expires_in"]
+            .as_i64()
+            .ok_or("Missing expires_in")?;
+        
+        let expires_at = Utc::now().timestamp() + expires_in;
+        
+        Ok(SpotifyToken {
+            access_token,
+            refresh_token,
+            expires_in,
+            expires_at,
+        })
+    } else {
+        let error_text: String = response.text().await.unwrap_or_else(|_| "Unknown error".to_string());
+        Err(format!("Failed to refresh token: {}", error_text))
+    }
+}
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Track {
@@ -66,6 +162,235 @@ pub struct AppState {
 #[tauri::command]
 pub fn open_devtools(window: tauri::WebviewWindow) {
     window.open_devtools();
+}
+
+#[tauri::command]
+pub async fn authenticate_spotify() -> Result<String, String> {
+    // Manual PKCE implementation
+    use rand::Rng;
+    use rand::rngs::OsRng;
+    use sha2::{Digest, Sha256};
+    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+    
+    let cache_path = get_cache_path()?;
+    std::fs::create_dir_all(cache_path.parent().unwrap())
+        .map_err(|e| format!("Failed to create cache directory: {}", e))?;
+    
+    // Generate code verifier
+    let code_verifier: String = {
+        let mut rng = OsRng;
+        (0..128)
+            .map(|_| {
+                let chars = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~";
+                chars[rng.gen_range(0..chars.len())] as char
+            })
+            .collect()
+    };
+    
+    // Generate code challenge
+    let code_challenge = {
+        let mut hasher = Sha256::new();
+        hasher.update(code_verifier.as_bytes());
+        let hash = hasher.finalize();
+        URL_SAFE_NO_PAD.encode(&hash)
+    };
+    
+    let client_id = "a42d7e4861544e72b357a5350aebfe8d";
+    let redirect_uri = "http://127.0.0.1:13337";
+    let scopes = "playlist-read-private playlist-read-collaborative user-library-read user-read-private user-read-email";
+    
+    // Construct authorization URL
+    let url = format!(
+        "https://accounts.spotify.com/authorize?client_id={}&response_type=code&redirect_uri={}&scope={}&code_challenge_method=S256&code_challenge={}",
+        client_id,
+        redirect_uri,
+        scopes,
+        code_challenge
+    );
+    
+    eprintln!("Authorization URL: {}", url);
+    
+    // Open browser
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("cmd")
+            .args(["/C", "start", "", &url])
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+    
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg(&url)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+    
+    #[cfg(target_os = "linux")]
+    {
+        std::process::Command::new("xdg-open")
+            .arg(&url)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+    
+    // Start server to capture callback
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:13337")
+        .await
+        .map_err(|e| format!("Failed to bind to port 13337: {}", e))?;
+    
+    match listener.accept().await {
+        Ok((mut socket, _)) => {
+            let mut buf = [0; 2048];
+            let n = socket.read(&mut buf).await.map_err(|e| format!("Failed to read from socket: {}", e))?;
+            let request = String::from_utf8_lossy(&buf[..n]);
+            
+            eprintln!("Received request: {}", request);
+            
+            // Extract the code from the request - stop at space or &
+            let code = request
+                .split("code=")
+                .nth(1)
+                .and_then(|s| s.split_whitespace().next())
+                .and_then(|s| s.split('&').next())
+                .ok_or("Failed to extract code from callback")?;
+            
+            eprintln!("Extracted code: {}", code);
+            
+            let response = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n<html><body>Authentication successful! You can close this window.</body></html>";
+            socket.write_all(response.as_bytes()).await.map_err(|e| format!("Failed to write response: {}", e))?;
+            
+            // Exchange code for token using reqwest
+            let client = reqwest::Client::new();
+            let params = [
+                ("grant_type", "authorization_code"),
+                ("code", code),
+                ("redirect_uri", redirect_uri),
+                ("client_id", client_id),
+                ("code_verifier", &code_verifier),
+            ];
+            
+            let response: reqwest::Response = client
+                .post("https://accounts.spotify.com/api/token")
+                .form(&params)
+                .send()
+                .await
+                .map_err(|e| format!("Failed to exchange code for token: {}", e))?;
+            
+            if response.status().is_success() {
+                let token_response: serde_json::Value = response
+                    .json()
+                    .await
+                    .map_err(|e| format!("Failed to parse token response: {}", e))?;
+                
+                eprintln!("Token response: {:?}", token_response);
+                
+                let access_token = token_response["access_token"]
+                    .as_str()
+                    .ok_or("Missing access_token")?
+                    .to_string();
+                
+                let refresh_token = token_response["refresh_token"]
+                    .as_str()
+                    .ok_or("Missing refresh_token")?
+                    .to_string();
+                
+                let expires_in = token_response["expires_in"]
+                    .as_i64()
+                    .ok_or("Missing expires_in")?;
+                
+                let expires_at = Utc::now().timestamp() + expires_in;
+                
+                let token = SpotifyToken {
+                    access_token,
+                    refresh_token,
+                    expires_in,
+                    expires_at,
+                };
+                
+                save_token(&token)?;
+                
+                Ok("Autenticado com sucesso! Token salvo no cache.".to_string())
+            } else {
+                let error_text: String = response.text().await.unwrap_or_else(|_| "Unknown error".to_string());
+                eprintln!("Token exchange error: {}", error_text);
+                Err(format!("Failed to get token: {}", error_text))
+            }
+        }
+        Err(e) => Err(format!("Failed to accept connection: {}", e))
+    }
+}
+
+#[tauri::command]
+pub async fn get_spotify_token() -> Result<String, String> {
+    // Try to load existing token
+    if let Some(token) = load_token() {
+        if is_token_valid(&token) {
+            return Ok(token.access_token);
+        }
+        
+        // Token expired, try to refresh
+        eprintln!("Token expired, attempting refresh...");
+        match refresh_token(&token.refresh_token).await {
+            Ok(new_token) => {
+                save_token(&new_token)?;
+                eprintln!("Token refreshed successfully");
+                return Ok(new_token.access_token);
+            }
+            Err(e) => {
+                eprintln!("Failed to refresh token: {}", e);
+                return Err(format!("Token expired and refresh failed: {}. Please authenticate again.", e));
+            }
+        }
+    }
+    
+    Err("No valid token found. Please authenticate first.".to_string())
+}
+
+#[tauri::command]
+pub async fn get_spotify_playlists() -> Result<Vec<SpotifyPlaylist>, String> {
+    let access_token = get_spotify_token().await?;
+    
+    let client = reqwest::Client::new();
+    let response: reqwest::Response = client
+        .get("https://api.spotify.com/v1/me/playlists")
+        .header("Authorization", format!("Bearer {}", access_token))
+        .send()
+        .await
+        .map_err(|e| format!("Failed to fetch playlists: {}", e))?;
+    
+    if response.status().is_success() {
+        let data: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|e| format!("Failed to parse response: {}", e))?;
+        
+        let items = data["items"]
+            .as_array()
+            .ok_or("Missing items in response")?;
+        
+        let playlists: Vec<SpotifyPlaylist> = items
+            .iter()
+            .filter_map(|item| {
+                let id = item["id"].as_str()?.to_string();
+                let name = item["name"].as_str()?.to_string();
+                let description = item["description"].as_str().map(String::from);
+                let external_urls = item["external_urls"].clone();
+                Some(SpotifyPlaylist {
+                    id,
+                    name,
+                    description,
+                    external_urls,
+                })
+            })
+            .collect();
+        
+        Ok(playlists)
+    } else {
+        let error_text: String = response.text().await.unwrap_or_else(|_| "Unknown error".to_string());
+        Err(format!("Failed to fetch playlists: {}", error_text))
+    }
 }
 
 #[tauri::command]
@@ -1433,4 +1758,566 @@ pub async fn copy_file_to_device(source_path: String, device_path: String) -> Re
         .map_err(|e| format!("Failed to copy file: {}", e))?;
 
     Ok(destination.to_string_lossy().to_string())
+}
+
+#[tauri::command]
+pub async fn check_ytdlp_available() -> Result<bool, String> {
+    // First try to check in system PATH
+    let path_check = tokio::process::Command::new("yt-dlp")
+        .arg("--version")
+        .output()
+        .await;
+
+    if let Ok(output) = path_check {
+        if output.status.success() {
+            return Ok(true);
+        }
+    }
+
+    // If not in PATH, check our installation directory
+    let executable_name = if cfg!(target_os = "windows") { "yt-dlp.exe" } else { "yt-dlp" };
+    
+    let install_dir = dirs::data_dir()
+        .or_else(|| dirs::home_dir())
+        .ok_or("Failed to get user directory")?
+        .join("whiplash");
+    
+    let install_path = install_dir.join(executable_name);
+    
+    if install_path.exists() {
+        // Try to run it to verify it works
+        let output = tokio::process::Command::new(&install_path)
+            .arg("--version")
+            .output()
+            .await;
+
+        match output {
+            Ok(output) => Ok(output.status.success()),
+            Err(_) => Ok(false)
+        }
+    } else {
+        Ok(false)
+    }
+}
+
+#[tauri::command]
+pub async fn install_ytdlp() -> Result<String, String> {
+    let (os, arch) = get_os_arch();
+    
+    let download_url = match (os.as_str(), arch.as_str()) {
+        ("windows", "x86_64") => "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe",
+        ("linux", "x86_64") => "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp",
+        ("macos", "x86_64") | ("macos", "aarch64") => "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_macos",
+        _ => return Err("Unsupported platform".to_string())
+    };
+
+    let client = reqwest::Client::new();
+    let response = client
+        .get(download_url)
+        .send()
+        .await
+        .map_err(|e| format!("Failed to download yt-dlp: {}", e))?;
+
+    if !response.status().is_success() {
+        return Err(format!("Failed to download yt-dlp: HTTP {}", response.status()));
+    }
+
+    let bytes = response
+        .bytes()
+        .await
+        .map_err(|e| format!("Failed to read yt-dlp binary: {}", e))?;
+
+    let executable_name = if os == "windows" { "yt-dlp.exe" } else { "yt-dlp" };
+    
+    // Get user's home directory or data directory for installation
+    let install_dir = dirs::data_dir()
+        .or_else(|| dirs::home_dir())
+        .ok_or("Failed to get user directory")?
+        .join("whiplash");
+    
+    std::fs::create_dir_all(&install_dir)
+        .map_err(|e| format!("Failed to create install directory: {}", e))?;
+
+    let install_path = install_dir.join(executable_name);
+    
+    std::fs::write(&install_path, bytes)
+        .map_err(|e| format!("Failed to write yt-dlp binary: {}", e))?;
+
+    // Make executable on Unix-like systems
+    #[cfg(not(target_os = "windows"))]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&install_path)
+            .map_err(|e| format!("Failed to get file permissions: {}", e))?
+            .permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&install_path, perms)
+            .map_err(|e| format!("Failed to set executable permissions: {}", e))?;
+    }
+
+    Ok(format!("yt-dlp installed successfully to: {}", install_path.display()))
+}
+
+fn get_os_arch() -> (String, String) {
+    let os = std::env::consts::OS;
+    let arch = std::env::consts::ARCH;
+    (os.to_string(), arch.to_string())
+}
+
+#[tauri::command]
+pub async fn logout_spotify() -> Result<String, String> {
+    let cache_path = get_cache_path()?;
+    
+    if cache_path.exists() {
+        std::fs::remove_file(&cache_path)
+            .map_err(|e| format!("Failed to remove Spotify token file: {}", e))?;
+        Ok("Successfully logged out from Spotify".to_string())
+    } else {
+        Ok("No Spotify session found".to_string())
+    }
+}
+
+#[tauri::command]
+pub async fn force_spotify_reauth() -> Result<String, String> {
+    // Clear the cached token to force re-authentication
+    let cache_path = get_cache_path()?;
+    
+    if cache_path.exists() {
+        std::fs::remove_file(&cache_path)
+            .map_err(|e| format!("Failed to remove Spotify token file: {}", e))?;
+    }
+    
+    Ok("Token cleared. Please authenticate again using the main authentication flow.".to_string())
+}
+
+#[tauri::command]
+pub async fn get_selected_watch_folder() -> Result<Option<i64>, String> {
+    // This would typically read from a config file
+    // For now, we'll return the first watch folder if available
+    // In a real implementation, this should be stored in a config file
+    Ok(None) // Placeholder - should be implemented with proper config storage
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct SpotifyTrack {
+    pub id: String,
+    pub name: String,
+    pub artists: Vec<String>,
+    pub album: String,
+    pub duration_ms: u32,
+    pub external_urls: serde_json::Value,
+}
+
+#[tauri::command]
+pub async fn get_spotify_playlist_tracks(playlist_id: String) -> Result<Vec<SpotifyTrack>, String> {
+    let access_token = get_spotify_token().await?;
+    
+    // eprintln!("DEBUG: Attempting to fetch tracks for playlist ID: {}", playlist_id);
+    
+    let client = reqwest::Client::new();
+    
+    // First, get playlist info to check if we can access it
+    let playlist_url = format!("https://api.spotify.com/v1/playlists/{}", playlist_id);
+    // eprintln!("DEBUG: Getting playlist info from: {}", playlist_url);
+    
+    let playlist_response = client
+        .get(&playlist_url)
+        .header("Authorization", format!("Bearer {}", access_token))
+        .header("Accept", "application/json")
+        .send()
+        .await
+        .map_err(|e| format!("Failed to request playlist info: {}", e))?;
+
+    // Declare is_public in wider scope to be available later
+    let mut is_public = false;
+
+    if playlist_response.status().is_success() {
+        let playlist_data: serde_json::Value = playlist_response
+            .json()
+            .await
+            .map_err(|e| format!("Failed to parse playlist info: {}", e))?;
+        
+        let playlist_name = playlist_data["name"].as_str().unwrap_or("Unknown");
+        let playlist_owner = playlist_data["owner"]["display_name"].as_str().unwrap_or("Unknown");
+        is_public = playlist_data["public"].as_bool().unwrap_or(false);
+        
+        // eprintln!("DEBUG: Playlist '{}' by '{}' (public: {})", playlist_name, playlist_owner, is_public);
+    } else {
+        let status = playlist_response.status();
+        let error_text = playlist_response.text().await.unwrap_or_else(|_| "Unknown error".to_string());
+        // eprintln!("DEBUG: Failed to get playlist info - Status: {}, Error: {}", status, error_text);
+        
+        if status.as_u16() == 403 {
+            return Err(format!("Cannot access playlist info (403). This playlist may be private or you don't have permission to access it.\n\nError: {}", error_text));
+        }
+        return Err(format!("Failed to get playlist info: {}", error_text));
+    }
+    
+    // Now try to get tracks
+    let url = format!("https://api.spotify.com/v1/playlists/{}/items", playlist_id);
+    // eprintln!("DEBUG: Making tracks request to: {}", url);
+    // eprintln!("DEBUG: Token length: {}", access_token.len());
+    // eprintln!("DEBUG: Token prefix: {}", &access_token[..10]);
+    // eprintln!("DEBUG: curl -X GET \"{}\" -H \"Authorization: Bearer {}\"", url, access_token);
+    
+    let mut tracks = Vec::new();
+    let mut offset = 0;
+    let limit = 50;
+    
+    loop {
+        let response: reqwest::Response = client
+            .get(&url)
+            .header("Authorization", format!("Bearer {}", access_token))
+            .header("Accept", "application/json")
+            .query(&[("limit", limit.to_string()), ("offset", offset.to_string())])
+            .send()
+            .await
+            .map_err(|e| format!("Failed to fetch playlist tracks: {}", e))?;
+        
+        if response.status().is_success() {
+            let data: serde_json::Value = response
+                .json()
+                .await
+                .map_err(|e| format!("Failed to parse response: {}", e))?;
+            
+            // eprintln!("DEBUG: Raw response keys: {:?}", data.as_object().map(|o| o.keys().collect::<Vec<_>>()));
+            
+            let items = data["items"]
+                .as_array()
+                .ok_or("Missing items in response")?;
+            
+            // eprintln!("DEBUG: Found {} items in response", items.len());
+            
+            if items.is_empty() {
+                break;
+            }
+            
+            // Log first item structure for debugging
+            if let Some(first_item) = items.first() {
+                // eprintln!("DEBUG: First item structure: {}", serde_json::to_string_pretty(first_item).unwrap_or_else(|_| "Failed to serialize".to_string()));
+            }
+            
+            for item in items {
+                // /items endpoint has structure: item.item (track data)
+                if let Some(track) = item["item"].as_object() {
+                    // Check if it's actually a track (not an episode)
+                    if track.get("type").and_then(|t| t.as_str()) == Some("track") {
+                        let id = track["id"]
+                            .as_str()
+                            .ok_or("Missing track id")?
+                            .to_string();
+                        
+                        let name = track["name"]
+                            .as_str()
+                            .ok_or("Missing track name")?
+                            .to_string();
+                        
+                        let artists: Vec<String> = track["artists"]
+                            .as_array()
+                            .ok_or("Missing artists")?
+                            .iter()
+                            .filter_map(|artist| artist["name"].as_str().map(String::from))
+                            .collect();
+                        
+                        let album = track["album"]["name"]
+                            .as_str()
+                            .unwrap_or("Unknown Album")
+                            .to_string();
+                        
+                        let duration_ms = track["duration_ms"]
+                            .as_u64()
+                            .unwrap_or(0) as u32;
+                        
+                        let external_urls = track["external_urls"].clone();
+                        
+                        tracks.push(SpotifyTrack {
+                            id,
+                            name,
+                            artists,
+                            album,
+                            duration_ms,
+                            external_urls,
+                        });
+                    }
+                }
+            }
+            
+            offset += limit;
+            
+            // Check if there are more tracks
+            let total = data["total"]
+                .as_u64()
+                .unwrap_or(0);
+            if offset >= total as usize {
+                break;
+            }
+        } else {
+            let status = response.status();
+            let error_text: String = response.text().await.unwrap_or_else(|_| "Unknown error".to_string());
+            
+            // eprintln!("DEBUG: HTTP Status: {}", status);
+            // eprintln!("DEBUG: Error response: {}", error_text);
+            
+            if status.as_u16() == 403 {
+                // Check if we successfully got playlist info and it's a public playlist
+                // If so, this might be a permissions issue with the items endpoint specifically
+                // Don't force logout for public playlists where info was accessible
+                if is_public {
+                    return Err(format!("Cannot access playlist tracks (403). The playlist appears to be public but track access is restricted.\n\nThis could be due to:\n1. Regional restrictions\n2. Playlist owner's privacy settings\n3. Content licensing restrictions\n\nError details: {}", error_text));
+                } else {
+                    return Err(format!("Access denied (403). This usually means:\n1. The token has expired - try re-authenticating\n2. The playlist is private and not accessible\n3. Missing required permissions\n\nError details: {}", error_text));
+                }
+            } else {
+                return Err(format!("Failed to fetch playlist tracks (HTTP {}): {}", status, error_text));
+            }
+        }
+    }
+    
+    Ok(tracks)
+}
+
+#[tauri::command]
+pub async fn get_spotify_saved_tracks() -> Result<Vec<SpotifyTrack>, String> {
+    let access_token = get_spotify_token().await?;
+    
+    let client = reqwest::Client::new();
+    
+    // Get user's saved tracks
+    let url = "https://api.spotify.com/v1/me/tracks";
+    
+    let mut tracks = Vec::new();
+    let mut offset = 0;
+    let limit = 50;
+    
+    loop {
+        let response: reqwest::Response = client
+            .get(url)
+            .header("Authorization", format!("Bearer {}", access_token))
+            .header("Accept", "application/json")
+            .query(&[("limit", limit.to_string()), ("offset", offset.to_string())])
+            .send()
+            .await
+            .map_err(|e| format!("Failed to request saved tracks: {}", e))?;
+
+        if response.status().is_success() {
+            let data: serde_json::Value = response
+                .json()
+                .await
+                .map_err(|e| format!("Failed to parse response: {}", e))?;
+            
+            let items = data["items"]
+                .as_array()
+                .ok_or("Invalid response format")?
+                .iter()
+                .filter_map(|item| {
+                    let track = item.get("track")?;
+                    Some(SpotifyTrack {
+                        id: track["id"].as_str()?.to_string(),
+                        name: track["name"].as_str()?.to_string(),
+                        artists: track["artists"]
+                            .as_array()?
+                            .iter()
+                            .filter_map(|artist| artist["name"].as_str().map(|s| s.to_string()))
+                            .collect(),
+                        album: track["album"]["name"].as_str().unwrap_or("Unknown").to_string(),
+                        duration_ms: track["duration_ms"].as_u64().unwrap_or(0) as u32,
+                        external_urls: track["external_urls"].clone(),
+                    })
+                })
+                .collect::<Vec<_>>();
+            
+            tracks.extend(items);
+            
+            let total = data["total"]
+                .as_u64()
+                .unwrap_or(0);
+            if offset >= total as usize {
+                break;
+            }
+            offset += limit;
+        } else {
+            let status = response.status();
+            let error_text: String = response.text().await.unwrap_or_else(|_| "Unknown error".to_string());
+            
+            if status.as_u16() == 403 {
+                return Err(format!("Access denied (403). This usually means:\n1. The token has expired - try re-authenticating\n2. Missing required permissions\n\nError details: {}", error_text));
+            } else {
+                return Err(format!("Failed to fetch saved tracks (HTTP {}): {}", status, error_text));
+            }
+        }
+    }
+    
+    Ok(tracks)
+}
+
+#[tauri::command]
+pub async fn search_youtube_video(query: String) -> Result<String, String> {
+    let client = reqwest::Client::new();
+    
+    // Format the query for YouTube search
+    let formatted_query = query.split_whitespace().collect::<Vec<_>>().join("+");
+    let url = format!("https://www.youtube.com/results?search_query={}", formatted_query);
+    
+    let response = client
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| format!("Failed to search YouTube: {}", e))?;
+    
+    if response.status().is_success() {
+        let html = response
+            .text()
+            .await
+            .map_err(|e| format!("Failed to get response text: {}", e))?;
+        
+        // Extract video IDs using regex
+        use regex::Regex;
+        let re = Regex::new(r"watch\?v=(\S{11})")
+            .map_err(|e| format!("Failed to compile regex: {}", e))?;
+        
+        let captures: Vec<_> = re.captures_iter(&html).collect();
+        
+        if let Some(capture) = captures.first() {
+            if let Some(video_id) = capture.get(1) {
+                return Ok(video_id.as_str().to_string());
+            }
+        }
+        
+        Err("No video found".to_string())
+    } else {
+        Err(format!("YouTube search failed: HTTP {}", response.status()))
+    }
+}
+
+#[tauri::command]
+pub async fn download_audio_from_youtube(video_id: String, output_path: String) -> Result<String, String> {
+    let video_url = format!("https://www.youtube.com/watch?v={}", video_id);
+    
+    // Get the yt-dlp executable path
+    let executable_name = if cfg!(target_os = "windows") { "yt-dlp.exe" } else { "yt-dlp" };
+    
+    let install_dir = dirs::data_dir()
+        .or_else(|| dirs::home_dir())
+        .ok_or("Failed to get user directory")?
+        .join("whiplash");
+    
+    let ytdlp_path = install_dir.join(executable_name);
+    
+    if !ytdlp_path.exists() {
+        return Err("yt-dlp is not installed. Please install it first.".to_string());
+    }
+    
+    // Use yt-dlp to download audio
+    let output = tokio::process::Command::new(&ytdlp_path)
+        .arg("--format")
+        .arg("m4a/bestaudio/best")
+        .arg("--output")
+        .arg(&output_path)
+        .arg("--quiet")
+        .arg("--no-warnings")
+        .arg(&video_url)
+        .output()
+        .await
+        .map_err(|e| format!("Failed to execute yt-dlp: {}", e))?;
+    
+    if output.status.success() {
+        Ok(format!("Successfully downloaded to: {}", output_path))
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        Err(format!("Download failed: {}", stderr))
+    }
+}
+
+#[tauri::command]
+pub async fn add_single_track_to_database(file_path: String, state: State<'_, AppState>) -> Result<Track, String> {
+    let path = Path::new(&file_path);
+    
+    // Scan the specific file
+    let scanned_track = scan_single_file(path)
+        .ok_or("Failed to scan the specified file or file is not a valid audio file")?;
+    
+    let db_guard = (*state).database.lock().unwrap();
+    let db = db_guard.as_ref().ok_or("Database not initialized")?;
+    let conn = db.get_connection();
+    
+    let now = Utc::now().timestamp();
+    let duration = scanned_track.duration.map(|d| d as f64);
+    
+    // Check if track already exists
+    let existing_track: Option<(i64, i32, Option<i64>, i64)> = conn
+        .query_row(
+            "SELECT id, play_count, last_played, date_added FROM tracks WHERE file_path = ?1",
+            params![&scanned_track.file_path],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .ok();
+    
+    let (id, play_count, last_played, date_added) = if let Some((id, pc, lp, da)) = existing_track {
+        // Update existing track, preserving play_count, last_played, and date_added
+        conn.execute(
+            "UPDATE tracks SET folder_path = ?1, file_name = ?2, title = ?3, artist = ?4, album = ?5, genre = ?6, year = ?7, track_number = ?8, duration = ?9, is_missing = 0, date_modified = ?10, rating = ?11 WHERE file_path = ?12",
+            params![
+                scanned_track.folder_path,
+                scanned_track.file_name,
+                scanned_track.title,
+                scanned_track.artist,
+                scanned_track.album,
+                scanned_track.genre,
+                scanned_track.year,
+                scanned_track.track_number.map(|t| t as i32),
+                duration,
+                now,
+                0,
+                scanned_track.file_path,
+            ],
+        ).map_err(|e: rusqlite::Error| e.to_string())?;
+        (id, pc, lp, da)
+    } else {
+        // Insert new track
+        conn.execute(
+            "INSERT INTO tracks
+             (file_path, folder_path, file_name, title, artist, album, genre, year, track_number, duration, play_count, date_added, last_played, is_missing, date_modified, rating)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+            params![
+                scanned_track.file_path,
+                scanned_track.folder_path,
+                scanned_track.file_name,
+                scanned_track.title,
+                scanned_track.artist,
+                scanned_track.album,
+                scanned_track.genre,
+                scanned_track.year,
+                scanned_track.track_number.map(|t| t as i32),
+                duration,
+                0,
+                now,
+                None::<i64>,
+                false,
+                now,
+                0,
+            ],
+        ).map_err(|e: rusqlite::Error| e.to_string())?;
+        let id = conn.last_insert_rowid();
+        (id, 0, None, now)
+    };
+    
+    Ok(Track {
+        id,
+        file_path: scanned_track.file_path,
+        folder_path: scanned_track.folder_path,
+        file_name: scanned_track.file_name,
+        title: scanned_track.title,
+        artist: scanned_track.artist,
+        album: scanned_track.album,
+        genre: scanned_track.genre,
+        year: scanned_track.year,
+        track_number: scanned_track.track_number.map(|t| t as i32),
+        duration,
+        play_count,
+        date_added,
+        last_played,
+        is_missing: false,
+        date_modified: Some(now),
+        rating: 0,
+    })
 }
