@@ -955,7 +955,7 @@ pub async fn reveal_in_file_explorer(file_path: String) -> Result<(), String> {
                 "--type=method_call",
                 "/org/freedesktop/FileManager1",
                 "org.freedesktop.FileManager1.ShowItems",
-                "array:string:file://".to_string() + &file_path,
+                &format!("array:string:file://{}", file_path),
                 "string:",
             ])
             .spawn();
