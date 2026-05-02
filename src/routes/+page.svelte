@@ -106,6 +106,14 @@
 	let playCountIncremented = $state(false);
 	let totalPlayedTime = $state(0);
 
+	// Update checking state
+	let showUpdateModal = $state(false);
+	let updateAvailable = $state(false);
+	let updateVersion = $state("");
+	let updateNotes = $state("");
+	let currentVersion = $state("");
+	let isInstallingUpdate = $state(false);
+
 	// Load saved database path on startup
 	async function loadSavedDatabase() {
 		const savedPath = localStorage.getItem("databasePath");
@@ -205,12 +213,69 @@
 		}
 	}
 
+	// Update checking functions
+	async function checkForUpdates() {
+		try {
+			const result = await invoke<{ available: boolean; version?: string; body?: string; date?: string }>('check_for_update');
+			
+			if (result.available) {
+				const currentVer = await invoke<string>('get_current_version');
+				displayUpdateModal(result.version || 'desconhecida', currentVer, result.body || '');
+			}
+		} catch (error) {
+			console.log('Verificação de update ao iniciar: update não disponível ou erro ao verificar');
+		}
+	}
+
+	function displayUpdateModal(newVersion: string, currentVer: string, notes: string) {
+		updateVersion = newVersion;
+		currentVersion = currentVer;
+		updateNotes = notes;
+		updateAvailable = true;
+		showUpdateModal = true;
+	}
+
+	async function installUpdate() {
+		isInstallingUpdate = true;
+		try {
+			await invoke('install_update');
+		} catch (error) {
+			console.error('Erro ao instalar atualização:', error);
+			alert('Erro ao instalar atualização: ' + String(error));
+			isInstallingUpdate = false;
+		}
+	}
+
+	function closeUpdateModal() {
+		showUpdateModal = false;
+	}
+
+	// Set up periodic update check (24 hours)
+	function setupPeriodicUpdateCheck() {
+		const CHECK_INTERVAL = 24 * 60 * 60 * 1000; // 24 horas
+		
+		setInterval(async () => {
+			try {
+				const result = await invoke<{ available: boolean; version?: string; body?: string; date?: string }>('check_for_update');
+				
+				if (result.available) {
+					const currentVer = await invoke<string>('get_current_version');
+					displayUpdateModal(result.version || 'desconhecida', currentVer, result.body || '');
+				}
+			} catch (error) {
+				console.log('Verificação periódica de update: erro ao verificar');
+			}
+		}, CHECK_INTERVAL);
+	}
+
 	// Call on mount
 	(async () => {
 		await loadSavedDatabase();
 		await restoreWindowSettings();
 		await setupWindowListeners();
 		await loadSavedVolume();
+		await checkForUpdates(); // Check for updates on startup
+		setupPeriodicUpdateCheck(); // Set up periodic checking
 	})();
 
 	async function initializeDatabase() {
@@ -2517,6 +2582,40 @@
 	}}
 />
 
+<!-- Update Modal -->
+{#if showUpdateModal}
+<div class="modal-overlay" onclick={closeUpdateModal}>
+	<div class="modal-content" onclick={(e) => e.stopPropagation()}>
+		<div class="modal-header">
+			<h2>Atualização Disponível</h2>
+			<button class="close-btn" onclick={closeUpdateModal}>&times;</button>
+		</div>
+		<div class="modal-body">
+			<p>Nova versão: <strong>{updateVersion}</strong></p>
+			<p>Versão atual: <strong>{currentVersion}</strong></p>
+			{#if updateNotes}
+				<div class="update-notes">
+					<h3>Notas da versão:</h3>
+					<p>{updateNotes}</p>
+				</div>
+			{/if}
+			<div class="modal-actions">
+				<button 
+					class="btn btn-primary" 
+					onclick={installUpdate}
+					disabled={isInstallingUpdate}
+				>
+					{isInstallingUpdate ? 'Baixando...' : 'Instalar Agora'}
+				</button>
+				<button class="btn btn-secondary" onclick={closeUpdateModal}>
+					Depois
+				</button>
+			</div>
+		</div>
+	</div>
+</div>
+{/if}
+
 <style>
 	:global(body) {
 		margin: 0;
@@ -3615,5 +3714,122 @@
 		gap: 12px;
 		margin-top: 24px;
 		justify-content: flex-end;
+	}
+
+	/* Update Modal Styles */
+	.modal-overlay {
+		position: fixed;
+		top: 0;
+		left: 0;
+		right: 0;
+		bottom: 0;
+		background: rgba(0, 0, 0, 0.7);
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		z-index: 1000;
+		backdrop-filter: blur(4px);
+	}
+
+	.modal-content {
+		background: #2d2d2d;
+		border-radius: 12px;
+		padding: 0;
+		max-width: 500px;
+		width: 90%;
+		max-height: 80vh;
+		overflow-y: auto;
+		box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+		border: 1px solid #404040;
+	}
+
+	.modal-header {
+		display: flex;
+		justify-content: space-between;
+		align-items: center;
+		padding: 20px 24px;
+		border-bottom: 1px solid #404040;
+	}
+
+	.modal-header h2 {
+		margin: 0;
+		color: #e0e0e0;
+		font-size: 20px;
+		font-weight: 600;
+	}
+
+	.close-btn {
+		background: none;
+		border: none;
+		color: #e0e0e0;
+		font-size: 24px;
+		cursor: pointer;
+		padding: 4px 8px;
+		border-radius: 4px;
+		transition: background-color 0.2s;
+	}
+
+	.close-btn:hover {
+		background: #404040;
+	}
+
+	.modal-body {
+		padding: 24px;
+	}
+
+	.modal-body p {
+		margin: 0 0 16px 0;
+		color: #e0e0e0;
+		line-height: 1.5;
+	}
+
+	.modal-body strong {
+		color: #ffffff;
+		font-weight: 600;
+	}
+
+	.update-notes {
+		margin: 20px 0;
+		padding: 16px;
+		background: rgba(255, 255, 255, 0.05);
+		border-radius: 8px;
+		border-left: 4px solid #007bff;
+	}
+
+	.update-notes h3 {
+		margin: 0 0 12px 0;
+		color: #007bff;
+		font-size: 16px;
+		font-weight: 600;
+	}
+
+	.update-notes p {
+		margin: 0;
+		color: #e0e0e0;
+		font-size: 14px;
+		line-height: 1.4;
+	}
+
+	.modal-actions {
+		display: flex;
+		gap: 12px;
+		margin-top: 24px;
+		justify-content: flex-end;
+	}
+
+	.modal-actions .btn {
+		padding: 10px 20px;
+		border: none;
+		border-radius: 6px;
+		cursor: pointer;
+		font-size: 14px;
+		font-weight: 500;
+		transition: all 0.2s;
+		min-width: 100px;
+	}
+
+	.modal-actions .btn:disabled {
+		opacity: 0.6;
+		cursor: not-allowed;
 	}
 </style>

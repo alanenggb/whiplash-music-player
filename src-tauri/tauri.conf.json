@@ -28,6 +28,7 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "createUpdaterArtifacts": true,
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -35,5 +36,13 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ]
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEYzN0QyQ0JEODJEQzE4MEYKUldRUEdOeUN2U3g5ODI5UDhPSXBKT0t6MVBFeVhTWXVpeWR0TFJSTlJVWmdPZjdYeEdRbk92bFYK",
+      "endpoints": [
+        "https://github.com/alanenggb/whiplash-music-player/releases/latest/download/latest.json"
+      ]
+    }
   }
 }

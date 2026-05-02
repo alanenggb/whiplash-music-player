@@ -2321,3 +2321,67 @@ pub async fn add_single_track_to_database(file_path: String, state: State<'_, Ap
         rating: 0,
     })
 }
+
+#[tauri::command]
+pub async fn check_for_update(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
+    use tauri_plugin_updater::UpdaterExt;
+    
+    match app.updater() {
+        Ok(updater) => {
+            match updater.check().await {
+                Ok(Some(update)) => {
+                    Ok(serde_json::json!({
+                        "available": true,
+                        "version": update.version,
+                        "body": update.body,
+                        "date": update.date.map(|d| d.to_string())
+                    }))
+                }
+                Ok(None) => {
+                    Ok(serde_json::json!({
+                        "available": false
+                    }))
+                }
+                Err(e) => Err(format!("Failed to check for updates: {}", e))
+            }
+        }
+        Err(e) => Err(format!("Failed to get updater: {}", e))
+    }
+}
+
+#[tauri::command]
+pub async fn install_update(app: tauri::AppHandle) -> Result<String, String> {
+    use tauri_plugin_updater::UpdaterExt;
+    
+    match app.updater() {
+        Ok(updater) => {
+            match updater.check().await {
+                Ok(Some(update)) => {
+                    match update.download_and_install(
+                        |chunk_length, content_length| {
+                            let content_len = content_length.unwrap_or(1);
+                            let progress = chunk_length as f64 / content_len as f64;
+                            println!("Download progress: {:.2}%", progress * 100.0);
+                        },
+                        || {
+                            println!("Download finished");
+                        },
+                    ).await {
+                        Ok(_) => {
+                            app.restart();
+                        }
+                        Err(e) => Err(format!("Failed to install update: {}", e))
+                    }
+                }
+                Ok(None) => Err("No update available".to_string()),
+                Err(e) => Err(format!("Failed to check for updates before install: {}", e))
+            }
+        }
+        Err(e) => Err(format!("Failed to get updater: {}", e))
+    }
+}
+
+#[tauri::command]
+pub fn get_current_version() -> String {
+    env!("CARGO_PKG_VERSION").to_string()
+}

@@ -20,6 +20,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(app_state)
         .invoke_handler(tauri::generate_handler![
             initialize_database,
@@ -86,6 +87,9 @@ pub fn run() {
             commands::force_spotify_reauth,
             commands::get_selected_watch_folder,
             commands::add_single_track_to_database,
+            commands::check_for_update,
+            commands::install_update,
+            commands::get_current_version,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
